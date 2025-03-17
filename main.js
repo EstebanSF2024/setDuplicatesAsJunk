@@ -1,4 +1,5 @@
 const mysql = require('mysql2/promise');
+const fs = require('fs');
 
 (async () => {
     const connection = await mysql.createConnection({
@@ -6,11 +7,15 @@ const mysql = require('mysql2/promise');
         user: 'root',
         password: 'root',
         database: 'sfco_crm_perf',
-        port: 3307 
+        port: 3308
     });
 
     console.log("✅ Conectado a la base de datos MySQL!");
-
+    
+    // Preparar archivo de reporte
+    const reportData = [];
+    const reportFileName = `duplicados_${new Date().toISOString().split('T')[0]}.csv`;
+    
     try {
         const [duplicates] = await connection.execute(`
             SELECT t1.*
@@ -36,40 +41,53 @@ const mysql = require('mysql2/promise');
 
         console.log(`🔍 Encontrados ${duplicates.length} registros duplicados.`);
 
-        //  Agrupar duplicados por `name` y `phonenumber`
+        // Agrupar duplicados por `name` y `phonenumber`
         const groupedLeads = {};
         for (const lead of duplicates) {
             const key = `${lead.name}_${lead.phonenumber}`;
-            if (!groupedLeads[key]) groupedLeads[ key] = [];
+            if (!groupedLeads[key]) groupedLeads[key] = [];
             groupedLeads[key].push(lead);
         }
 
+        // Cabecera del CSV
+        reportData.push('Grupo,Nombre,Teléfono,ID,Acción,Puntuación,Campos Completos,Estado');
+
         for (const key in groupedLeads) {
             const leads = groupedLeads[key];
- 
-            //  Calcular puntajes y ordenar
+            
+            // Calcular puntajes y ordenar
             const scoredLeads = leads.map(lead => {
                 let filledFieldsCount = Object.values(lead).filter(v => v !== null && v !== "" && v !== "none" && v !== 0).length;
                 let statusScore = lead.status !== 13 ? 5 : 0; // 📌 Si no es "new", +5 puntos
-                return { ...lead, score: filledFieldsCount + statusScore };
+                return { ...lead, score: filledFieldsCount + statusScore, filledFieldsCount };
             });
-
+            
             scoredLeads.sort((a, b) => b.score - a.score);
-
-            //  Mantener el mejor registro
+            
+            // Mantener el mejor registro
             const bestLead = scoredLeads[0];
             console.log(`✅ Manteniendo ID ${bestLead.id} como válido.`);
-
-            //  Marcar los demás como `junk = 1`
+            
+            // Añadir al reporte el registro que se mantiene
+            reportData.push(`${key},${bestLead.name},${bestLead.phonenumber},${bestLead.id},MANTENER,${bestLead.score},${bestLead.filledFieldsCount},${bestLead.status}`);
+            
+            // Marcar los demás como `junk = 1`
             for (let i = 1; i < scoredLeads.length; i++) {
                 await connection.execute(
                     `UPDATE tblleads SET junk = 1 WHERE id = ?`,
                     [scoredLeads[i].id]
                 );
                 console.log(`⚠️ Marcado como junk: ID ${scoredLeads[i].id}`);
+                
+                // Añadir al reporte los registros marcados como junk
+                reportData.push(`${key},${scoredLeads[i].name},${scoredLeads[i].phonenumber},${scoredLeads[i].id},JUNK,${scoredLeads[i].score},${scoredLeads[i].filledFieldsCount},${scoredLeads[i].status}`);
             }
         }
 
+        // Escribir el archivo de reporte
+        fs.writeFileSync(reportFileName, reportData.join('\n'), 'utf8');
+        console.log(`📊 Reporte generado: ${reportFileName}`);
+        
         console.log("✅ Proceso de limpieza de duplicados completado.");
     } catch (error) {
         console.error("❌ Error:", error);
